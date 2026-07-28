@@ -1,0 +1,15 @@
+services:
+  olx-radar:
+    build: .
+    container_name: olx-radar
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - olx-radar-data:/app/data
+
+volumes:
+  olx-radar-data:
+    name: olx-radar-data
