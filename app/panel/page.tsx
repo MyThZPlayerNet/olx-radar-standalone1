@@ -63,10 +63,21 @@ function listFromText(value: string): string[] {
 
 function formatDate(value: string | null): string {
   if (!value) return "Jeszcze nie";
+
+  // SQLite's CURRENT_TIMESTAMP is UTC, but it is returned without a timezone
+  // suffix (for example "2026-07-28 22:59:24"). Add the missing UTC marker so
+  // browsers do not interpret it as a local timestamp.
+  const normalizedValue = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(
+    value,
+  )
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+
   return new Intl.DateTimeFormat("pl-PL", {
     dateStyle: "short",
     timeStyle: "medium",
-  }).format(new Date(value));
+    timeZone: "Europe/Warsaw",
+  }).format(new Date(normalizedValue));
 }
 
 export default function UserPanel() {
