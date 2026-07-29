@@ -519,10 +519,16 @@ export default function UserPanel() {
               </button>
             </div>
           </div>
-          <div className="radar-visual" aria-hidden="true">
+          <div
+            className={`radar-visual ${status.active ? "is-active" : "is-idle"}`}
+            aria-hidden="true"
+          >
             <i className="ring one" />
             <i className="ring two" />
             <i className="sweep" />
+            <i className="radar-blip blip-one" />
+            <i className="radar-blip blip-two" />
+            <i className="radar-blip blip-three" />
             <small>{market.label}</small>
             <span>{config.query.slice(0, 18)}</span>
           </div>
