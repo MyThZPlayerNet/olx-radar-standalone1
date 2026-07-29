@@ -20,7 +20,7 @@ function appUrl(): string {
   try {
     return new URL(value).toString();
   } catch {
-    console.error("[OLX Radar] APP_URL ma niepoprawny format.");
+    console.error("[Radar Market] APP_URL ma niepoprawny format.");
     return "http://localhost:3000";
   }
 }
@@ -38,7 +38,7 @@ export function startMonitorScheduler(): void {
     try {
       await runDueMonitors(getAppEnv(), appUrl());
     } catch (error) {
-      console.error("[OLX Radar] Błąd harmonogramu:", error);
+      console.error("[Radar Market] Błąd harmonogramu:", error);
     } finally {
       state.running = false;
     }
@@ -48,5 +48,5 @@ export function startMonitorScheduler(): void {
   state.timer = setInterval(() => void tick(), delay);
   state.timer.unref();
   setTimeout(() => void tick(), 1_000).unref();
-  console.info(`[OLX Radar] Monitor uruchomiony (kontrola co ${delay / 1000} s).`);
+  console.info(`[Radar Market] Monitor uruchomiony (kontrola co ${delay / 1000} s).`);
 }

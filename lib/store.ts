@@ -4,6 +4,7 @@ import { HttpError } from "@/lib/errors";
 import type { AppEnv } from "@/lib/runtime";
 import type {
   ConfigInput,
+  Platform,
   RadarConfig,
   RadarRow,
   RadarStatus,
@@ -12,10 +13,15 @@ import type {
 
 let schemaReady: Promise<void> | null = null;
 
+export function platformFromUnknown(value: unknown): Platform {
+  if (value === "olx" || value === "vinted") return value;
+  throw new HttpError(400, "Wybierz poprawny serwis: OLX albo Vinted.");
+}
+
 export async function ensureSchema(db: DatabaseLike): Promise<void> {
   if (!schemaReady) {
-    schemaReady = db
-      .batch([
+    schemaReady = (async () => {
+      await db.batch([
         db.prepare(`
           CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
@@ -40,6 +46,8 @@ export async function ensureSchema(db: DatabaseLike): Promise<void> {
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
           )
         `),
+        // Legacy tables are kept so existing Railway volumes can be migrated
+        // without losing OLX settings, webhook secrets or seen-offer history.
         db.prepare(`
           CREATE TABLE IF NOT EXISTS radars (
             owner_username TEXT PRIMARY KEY REFERENCES users(username) ON DELETE CASCADE,
@@ -96,21 +104,111 @@ export async function ensureSchema(db: DatabaseLike): Promise<void> {
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
           )
         `),
+        db.prepare(`
+          CREATE TABLE IF NOT EXISTS radar_profiles (
+            owner_username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+            platform TEXT NOT NULL CHECK(platform IN ('olx', 'vinted')),
+            name TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            query TEXT NOT NULL,
+            category_id INTEGER NOT NULL DEFAULT 0,
+            min_price INTEGER DEFAULT 100,
+            max_price INTEGER DEFAULT 7000,
+            interval_seconds INTEGER NOT NULL DEFAULT 60,
+            include_keywords TEXT NOT NULL DEFAULT '[]',
+            exclude_keywords TEXT NOT NULL DEFAULT '[]',
+            match_all_keywords INTEGER NOT NULL DEFAULT 0,
+            locations TEXT NOT NULL DEFAULT '[]',
+            conditions TEXT NOT NULL DEFAULT '[]',
+            seller_type TEXT NOT NULL DEFAULT 'all',
+            delivery_required INTEGER NOT NULL DEFAULT 0,
+            skip_promoted INTEGER NOT NULL DEFAULT 0,
+            max_age_minutes INTEGER NOT NULL DEFAULT 180,
+            discord_username TEXT NOT NULL,
+            discord_avatar_url TEXT NOT NULL DEFAULT '',
+            discord_role_id TEXT NOT NULL DEFAULT '',
+            discord_color INTEGER NOT NULL DEFAULT 3447003,
+            webhook_ciphertext TEXT,
+            webhook_iv TEXT,
+            active INTEGER NOT NULL DEFAULT 0,
+            initialized INTEGER NOT NULL DEFAULT 0,
+            last_check_at TEXT,
+            next_check_at TEXT,
+            last_error TEXT,
+            last_fetched INTEGER NOT NULL DEFAULT 0,
+            last_matched INTEGER NOT NULL DEFAULT 0,
+            last_sent INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (owner_username, platform)
+          )
+        `),
+        db.prepare(`
+          CREATE TABLE IF NOT EXISTS radar_seen_offers (
+            owner_username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+            platform TEXT NOT NULL CHECK(platform IN ('olx', 'vinted')),
+            offer_id TEXT NOT NULL,
+            seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (owner_username, platform, offer_id)
+          )
+        `),
+        db.prepare(`
+          CREATE TABLE IF NOT EXISTS radar_poll_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+            platform TEXT NOT NULL CHECK(platform IN ('olx', 'vinted')),
+            fetched INTEGER NOT NULL DEFAULT 0,
+            matched INTEGER NOT NULL DEFAULT 0,
+            sent INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          )
+        `),
         db.prepare(
-          "CREATE INDEX IF NOT EXISTS radars_due_idx ON radars(active, next_check_at)",
+          "CREATE INDEX IF NOT EXISTS radar_profiles_due_idx ON radar_profiles(active, next_check_at)",
         ),
         db.prepare(
           "CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at)",
         ),
         db.prepare(
-          "CREATE INDEX IF NOT EXISTS seen_offers_owner_idx ON seen_offers(owner_username, seen_at)",
+          "CREATE INDEX IF NOT EXISTS radar_seen_owner_idx ON radar_seen_offers(owner_username, platform, seen_at)",
         ),
-      ])
-      .then(() => undefined)
-      .catch((error) => {
-        schemaReady = null;
-        throw error;
-      });
+      ]);
+
+      await db.batch([
+        db.prepare(`
+          INSERT OR IGNORE INTO radar_profiles (
+            owner_username, platform, name, source_url, query, category_id,
+            min_price, max_price, interval_seconds, include_keywords,
+            exclude_keywords, match_all_keywords, locations, conditions,
+            seller_type, delivery_required, skip_promoted, max_age_minutes,
+            discord_username, discord_avatar_url, discord_role_id, discord_color,
+            webhook_ciphertext, webhook_iv, active, initialized, last_check_at,
+            next_check_at, last_error, last_fetched, last_matched, last_sent,
+            created_at, updated_at
+          )
+          SELECT
+            owner_username, 'olx', name, olx_url, query, category_id,
+            min_price, max_price, interval_seconds, include_keywords,
+            exclude_keywords, match_all_keywords, locations, conditions,
+            seller_type, delivery_required, skip_promoted, max_age_minutes,
+            discord_username, discord_avatar_url, discord_role_id, discord_color,
+            webhook_ciphertext, webhook_iv, active, initialized, last_check_at,
+            next_check_at, last_error, last_fetched, last_matched, last_sent,
+            created_at, updated_at
+          FROM radars
+        `),
+        db.prepare(`
+          INSERT OR IGNORE INTO radar_seen_offers (
+            owner_username, platform, offer_id, seen_at
+          )
+          SELECT owner_username, 'olx', offer_id, seen_at FROM seen_offers
+        `),
+      ]);
+    })().catch((error) => {
+      schemaReady = null;
+      throw error;
+    });
   }
   await schemaReady;
 }
@@ -120,23 +218,62 @@ export async function ensureRadar(
   username: string,
 ): Promise<void> {
   await ensureSchema(db);
-  await db
-    .prepare("INSERT OR IGNORE INTO radars (owner_username) VALUES (?)")
-    .bind(username)
-    .run();
+  await db.batch([
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO radar_profiles (
+           owner_username, platform, name, source_url, query,
+           exclude_keywords, discord_username, discord_color
+         ) VALUES (?, 'olx', 'Mój radar OLX',
+           'https://www.olx.pl/oferty/q-Iphone/', 'Iphone',
+           '["uszkodzony","uszkodzona","zamienię"]', 'OLX Radar', 3447003)`,
+      )
+      .bind(username),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO radar_profiles (
+           owner_username, platform, name, source_url, query,
+           exclude_keywords, discord_username, discord_color, max_age_minutes
+         ) VALUES (?, 'vinted', 'Mój radar Vinted',
+           'https://www.vinted.pl/catalog?search_text=iphone', 'iphone',
+           '["uszkodzony","podróbka"]', 'Vinted Radar', 4830909, 0)`,
+      )
+      .bind(username),
+  ]);
 }
 
 export async function getRadarRow(
   db: DatabaseLike,
   username: string,
+  platform: Platform,
 ): Promise<RadarRow> {
   await ensureRadar(db, username);
   const row = await db
-    .prepare("SELECT * FROM radars WHERE owner_username = ?")
-    .bind(username)
+    .prepare(
+      "SELECT * FROM radar_profiles WHERE owner_username = ? AND platform = ?",
+    )
+    .bind(username, platform)
     .first<RadarRow>();
   if (!row) throw new HttpError(404, "Nie znaleziono konfiguracji radaru.");
   return row;
+}
+
+export async function getRadarRows(
+  db: DatabaseLike,
+  username: string,
+): Promise<Record<Platform, RadarRow>> {
+  await ensureRadar(db, username);
+  const result = await db
+    .prepare("SELECT * FROM radar_profiles WHERE owner_username = ?")
+    .bind(username)
+    .all<RadarRow>();
+  const rows = result.results ?? [];
+  const olx = rows.find((row) => row.platform === "olx");
+  const vinted = rows.find((row) => row.platform === "vinted");
+  if (!olx || !vinted) {
+    throw new HttpError(404, "Nie udało się przygotować obu radarów.");
+  }
+  return { olx, vinted };
 }
 
 function parseList(value: string): string[] {
@@ -169,10 +306,11 @@ export function publicConfig(row: RadarRow): RadarConfig {
     maxPrice: row.max_price,
     minPrice: row.min_price,
     name: row.name,
-    olxUrl: row.olx_url,
+    platform: row.platform,
     query: row.query,
     sellerType: row.seller_type,
     skipPromoted: Boolean(row.skip_promoted),
+    sourceUrl: row.source_url,
     webhookConfigured: Boolean(row.webhook_ciphertext && row.webhook_iv),
   };
 }
@@ -235,15 +373,30 @@ function sellerType(value: unknown): SellerType {
   throw new HttpError(400, "Wybierz poprawny typ sprzedającego.");
 }
 
-function validateOlxUrl(value: string): void {
+function validateSourceUrl(value: string, platform: Platform): void {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new HttpError(400, "Wklej poprawny adres wyszukiwania OLX.");
+    throw new HttpError(400, "Wklej poprawny adres wyszukiwania.");
   }
-  if (url.protocol !== "https:" || !url.hostname.endsWith("olx.pl")) {
-    throw new HttpError(400, "Adres musi prowadzić do serwisu olx.pl.");
+  if (url.protocol !== "https:") {
+    throw new HttpError(400, "Adres wyszukiwania musi używać HTTPS.");
+  }
+  if (platform === "olx") {
+    if (!(url.hostname === "olx.pl" || url.hostname.endsWith(".olx.pl"))) {
+      throw new HttpError(400, "Adres musi prowadzić do serwisu olx.pl.");
+    }
+    return;
+  }
+  if (
+    !(url.hostname === "vinted.pl" || url.hostname === "www.vinted.pl") ||
+    !url.pathname.startsWith("/catalog")
+  ) {
+    throw new HttpError(
+      400,
+      "Wklej link do wyników wyszukiwania z vinted.pl/catalog.",
+    );
   }
 }
 
@@ -272,12 +425,14 @@ export function validateWebhookUrl(value: string): void {
 export async function saveRadar(
   env: AppEnv,
   username: string,
+  platform: Platform,
   requestUrl: string,
   raw: ConfigInput,
 ): Promise<RadarConfig> {
+  await ensureRadar(env.DB, username);
   const name = requiredText(raw.name, "Nazwa radaru", 80);
-  const olxUrl = requiredText(raw.olxUrl, "Link OLX", 1000);
-  validateOlxUrl(olxUrl);
+  const sourceUrl = requiredText(raw.sourceUrl, "Link wyszukiwania", 1500);
+  validateSourceUrl(sourceUrl, platform);
   const query = requiredText(raw.query, "Fraza wyszukiwania", 160);
   const minPrice = optionalPrice(raw.minPrice, "Cena od");
   const maxPrice = optionalPrice(raw.maxPrice, "Cena do");
@@ -300,7 +455,7 @@ export async function saveRadar(
 
   const assignments = [
     "name = ?",
-    "olx_url = ?",
+    "source_url = ?",
     "query = ?",
     "category_id = ?",
     "min_price = ?",
@@ -323,7 +478,7 @@ export async function saveRadar(
   ];
   const values: unknown[] = [
     name,
-    olxUrl,
+    sourceUrl,
     query,
     integer(raw.categoryId, "ID kategorii", 0, 999_999),
     minPrice,
@@ -347,35 +502,40 @@ export async function saveRadar(
     assignments.push("webhook_ciphertext = ?", "webhook_iv = ?");
     values.push(webhookCiphertext, webhookIv);
   }
-  values.push(username);
+  values.push(username, platform);
 
   await env.DB.prepare(
-    `UPDATE radars SET ${assignments.join(", ")} WHERE owner_username = ?`,
+    `UPDATE radar_profiles SET ${assignments.join(", ")}
+     WHERE owner_username = ? AND platform = ?`,
   )
     .bind(...values)
     .run();
-  return publicConfig(await getRadarRow(env.DB, username));
+  return publicConfig(await getRadarRow(env.DB, username, platform));
 }
 
 export async function setRadarActive(
   db: DatabaseLike,
   username: string,
+  platform: Platform,
   active: boolean,
 ): Promise<RadarStatus> {
-  const row = await getRadarRow(db, username);
+  const row = await getRadarRow(db, username, platform);
   if (active && !(row.webhook_ciphertext && row.webhook_iv)) {
-    throw new HttpError(400, "Najpierw dodaj webhook Discord.");
+    throw new HttpError(
+      400,
+      `Najpierw dodaj webhook Discord dla radaru ${platform === "olx" ? "OLX" : "Vinted"}.`,
+    );
   }
   await db
     .prepare(
-      `UPDATE radars
+      `UPDATE radar_profiles
        SET active = ?,
            next_check_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
            last_error = NULL,
            updated_at = CURRENT_TIMESTAMP
-       WHERE owner_username = ?`,
+       WHERE owner_username = ? AND platform = ?`,
     )
-    .bind(active ? 1 : 0, active ? 1 : 0, username)
+    .bind(active ? 1 : 0, active ? 1 : 0, username, platform)
     .run();
-  return publicStatus(await getRadarRow(db, username));
+  return publicStatus(await getRadarRow(db, username, platform));
 }

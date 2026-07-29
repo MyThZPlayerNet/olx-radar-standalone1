@@ -1,9 +1,5 @@
-import type { PublicOffer, RadarConfig } from "@/lib/types";
-
-type Offer = PublicOffer & {
-  conditionKey: string;
-  description: string;
-};
+import type { Offer } from "@/lib/offers";
+import type { RadarConfig } from "@/lib/types";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -118,83 +114,3 @@ export async function fetchOlxOffers(config: RadarConfig): Promise<Offer[]> {
     .map((item, index) => offerFromApi(record(item), promoted.has(index)))
     .filter((offer): offer is Offer => offer !== null);
 }
-
-function normalize(value: string): string {
-  return value
-    .toLocaleLowerCase("pl-PL")
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "");
-}
-
-export function matchesRadar(offer: Offer, config: RadarConfig): boolean {
-  const searchable = normalize(`${offer.title}\n${offer.description}`);
-  const included = config.includeKeywords.map(normalize);
-  if (
-    included.length &&
-    (config.matchAllKeywords
-      ? !included.every((keyword) => searchable.includes(keyword))
-      : !included.some((keyword) => searchable.includes(keyword)))
-  ) {
-    return false;
-  }
-  if (
-    config.excludeKeywords
-      .map(normalize)
-      .some((keyword) => searchable.includes(keyword))
-  ) {
-    return false;
-  }
-  if (
-    config.locations.length &&
-    !config.locations
-      .map(normalize)
-      .some((location) => normalize(offer.location).includes(location))
-  ) {
-    return false;
-  }
-  if (
-    config.conditions.length &&
-    !config.conditions
-      .map(normalize)
-      .some((condition) =>
-        [offer.condition, offer.conditionKey].map(normalize).includes(condition),
-      )
-  ) {
-    return false;
-  }
-  if (config.sellerType !== "all" && offer.sellerType !== config.sellerType) {
-    return false;
-  }
-  if (config.deliveryRequired && !offer.delivery) return false;
-  if (config.skipPromoted && offer.promoted) return false;
-  if (
-    config.minPrice !== null &&
-    (offer.price === null || offer.price < config.minPrice)
-  ) {
-    return false;
-  }
-  if (
-    config.maxPrice !== null &&
-    (offer.price === null || offer.price > config.maxPrice)
-  ) {
-    return false;
-  }
-  if (config.maxAgeMinutes > 0) {
-    const createdAt = Date.parse(offer.createdAt);
-    if (
-      Number.isNaN(createdAt) ||
-      Date.now() - createdAt > config.maxAgeMinutes * 60_000
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
-export function toPublicOffer(offer: Offer): PublicOffer {
-  const { conditionKey: _conditionKey, description: _description, ...result } =
-    offer;
-  return result;
-}
-
-export type { Offer };

@@ -1,7 +1,8 @@
-# OLX Radar Standalone
+# Radar Market Standalone
 
-Samodzielna, wieloużytkownikowa aplikacja do monitorowania ogłoszeń OLX.
-Każdy użytkownik ma własne filtry, historię ogłoszeń i webhook Discord.
+Samodzielna, wieloużytkownikowa aplikacja do monitorowania ofert OLX i Vinted.
+Każdy użytkownik ma dwa niezależne radary, własne filtry, osobną historię
+ogłoszeń i osobny webhook Discord dla każdego serwisu.
 Nie ma publicznej rejestracji — konta i hasła tymczasowe tworzy administrator.
 
 Ta wersja nie korzysta z `chatgpt.site`, Cloudflare D1 ani zewnętrznej bazy
@@ -85,9 +86,17 @@ automatycznie wznowi aplikację po restarcie serwera.
 
 - wbudowany harmonogram sprawdza aktywne radary co 10 sekund,
 - faktyczna częstotliwość każdego radaru pochodzi z ustawień użytkownika,
+- radary OLX i Vinted mogą działać równocześnie,
+- panel pozwala przełączać ich pełne konfiguracje jednym suwakiem,
 - minimalny interwał to 30 sekund,
 - jedno ogłoszenie nie jest wysyłane ponownie,
 - błąd jednego radaru nie zatrzymuje pozostałych kont.
+
+Integracja Vinted korzysta z publicznych wyników wyszukiwania. Wklejony link
+`vinted.pl/catalog` zachowuje filtry ustawione wcześniej na Vinted, np.
+kategorię, markę i rozmiar. Vinted może okresowo ograniczać automatyczne
+zapytania; taki błąd jest zapisany przy konkretnym radarze i monitor ponawia
+sprawdzenie w następnym interwale.
 
 Panel i harmonogram muszą działać jako jedna instancja aplikacji. Przy wielu
 replikach blokada w bazie ogranicza duplikaty, ale zalecana jest jedna replika.

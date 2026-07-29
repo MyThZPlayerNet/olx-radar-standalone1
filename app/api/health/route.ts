@@ -8,13 +8,13 @@ export async function GET(): Promise<Response> {
     const env = getAppEnv();
     await ensureSchema(env.DB);
     return Response.json({
-      service: "olx-radar",
+      service: "radar-market",
       status: "ok",
       time: new Date().toISOString(),
     });
   } catch {
     return Response.json(
-      { service: "olx-radar", status: "error" },
+      { service: "radar-market", status: "error" },
       { status: 503 },
     );
   }

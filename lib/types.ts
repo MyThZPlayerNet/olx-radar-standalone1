@@ -1,4 +1,5 @@
 export type SellerType = "all" | "private" | "business";
+export type Platform = "olx" | "vinted";
 
 export type RadarConfig = {
   active: boolean;
@@ -18,10 +19,11 @@ export type RadarConfig = {
   maxPrice: number | null;
   minPrice: number | null;
   name: string;
-  olxUrl: string;
+  platform: Platform;
   query: string;
   sellerType: SellerType;
   skipPromoted: boolean;
+  sourceUrl: string;
   webhookConfigured: boolean;
 };
 
@@ -82,11 +84,12 @@ export type RadarRow = {
   min_price: number | null;
   name: string;
   next_check_at: string | null;
-  olx_url: string;
   owner_username: string;
+  platform: Platform;
   query: string;
   seller_type: SellerType;
   skip_promoted: number;
+  source_url: string;
   webhook_ciphertext: string | null;
   webhook_iv: string | null;
 };

@@ -5,6 +5,7 @@ import {
   jsonError,
   requireApiAccount,
 } from "@/lib/security";
+import { platformFromUnknown } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,13 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const { env, account } = await requireApiAccount(request);
     assertPasswordChanged(account);
-    const result = await runUserRadar(env, account.username, request.url);
+    const payload = (await request.json()) as { platform?: unknown };
+    const result = await runUserRadar(
+      env,
+      account.username,
+      platformFromUnknown(payload.platform),
+      request.url,
+    );
     return Response.json(result);
   } catch (error) {
     return jsonError(error);

@@ -10,9 +10,9 @@ export async function generateMetadata(): Promise<Metadata> {
     requestHeaders.get("x-forwarded-proto") ??
     (host?.startsWith("localhost") ? "http" : "https");
   const origin = host ? `${protocol}://${host}` : "https://olx-radar.invalid";
-  const title = "OLX Radar — prywatny monitor okazji";
+  const title = "Radar Market — monitor OLX i Vinted";
   const description =
-    "Osobisty radar ogłoszeń OLX z prywatnymi filtrami i powiadomieniami Discord.";
+    "Osobisty radar ofert OLX i Vinted z prywatnymi filtrami oraz powiadomieniami Discord.";
 
   return {
     title,
@@ -23,7 +23,7 @@ export async function generateMetadata(): Promise<Metadata> {
     },
     openGraph: {
       description,
-      images: [{ alt: "OLX Radar", url: `${origin}/og.png` }],
+      images: [{ alt: "Radar Market — OLX i Vinted", url: `${origin}/og-v2.png` }],
       title,
       type: "website",
       url: origin,
@@ -31,7 +31,7 @@ export async function generateMetadata(): Promise<Metadata> {
     twitter: {
       card: "summary_large_image",
       description,
-      images: [`${origin}/og.png`],
+      images: [`${origin}/og-v2.png`],
       title,
     },
   };

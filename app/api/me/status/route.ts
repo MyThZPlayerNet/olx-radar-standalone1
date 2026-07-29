@@ -1,14 +1,16 @@
 import { requireApiAccount, jsonError } from "@/lib/security";
-import { getRadarRow, publicStatus } from "@/lib/store";
+import { getRadarRows, publicStatus } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
     const { env, account } = await requireApiAccount(request);
-    return Response.json(
-      publicStatus(await getRadarRow(env.DB, account.username)),
-    );
+    const rows = await getRadarRows(env.DB, account.username);
+    return Response.json({
+      olx: publicStatus(rows.olx),
+      vinted: publicStatus(rows.vinted),
+    });
   } catch (error) {
     return jsonError(error);
   }

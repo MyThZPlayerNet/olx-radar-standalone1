@@ -2,8 +2,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("ships the protected OLX Radar account experience", async () => {
-  const [layout, login, panel, admin, packageJson, database, scheduler, docker] =
+test("ships the protected OLX and Vinted Radar Market experience", async () => {
+  const [
+    layout,
+    login,
+    panel,
+    admin,
+    packageJson,
+    database,
+    scheduler,
+    store,
+    vinted,
+    docker,
+  ] =
     await Promise.all([
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
@@ -12,13 +23,16 @@ test("ships the protected OLX Radar account experience", async () => {
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../lib/database.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/scheduler.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/vinted.ts", import.meta.url), "utf8"),
     readFile(new URL("../Dockerfile", import.meta.url), "utf8"),
   ]);
 
-  assert.match(layout, /OLX Radar — prywatny monitor okazji/);
+  assert.match(layout, /Radar Market — monitor OLX i Vinted/);
   assert.match(login, /Zaloguj się do radaru/);
   assert.match(login, /Nie ma publicznej rejestracji/);
-  assert.match(panel, /Webhook nigdy nie jest wyświetlany po zapisaniu/);
+  assert.match(panel, /Dwa serwisy\. Jedno konto\./);
+  assert.match(panel, /Radar Market · OLX \+ Vinted/);
   assert.match(admin, /Wygeneruj konto/);
   assert.equal(
     JSON.parse(packageJson).scripts.start,
@@ -26,7 +40,12 @@ test("ships the protected OLX Radar account experience", async () => {
   );
   assert.match(database, /node:sqlite/);
   assert.match(scheduler, /runDueMonitors/);
-  assert.match(docker, /VOLUME \["\/app\/data"\]/);
+  assert.match(store, /CREATE TABLE IF NOT EXISTS radar_profiles/);
+  assert.match(store, /platform TEXT NOT NULL CHECK\(platform IN \('olx', 'vinted'\)\)/);
+  assert.match(vinted, /api\/v2\/catalog\/items/);
+  assert.match(vinted, /access_token_web/);
+  assert.match(docker, /DATABASE_PATH=\/app\/data\/olx-radar\.db/);
+  assert.doesNotMatch(docker, /^\s*VOLUME\b/m);
   assert.doesNotMatch(packageJson, /vinext|wrangler|cloudflare/i);
   assert.doesNotMatch(`${layout}${login}${panel}${admin}`, /codex-preview/i);
 });

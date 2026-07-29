@@ -32,7 +32,9 @@ export default function AdminPage() {
   }
 
   useEffect(() => {
-    loadAccounts().catch((reason: Error) => setError(reason.message));
+    void api<{ accounts: Account[] }>("/api/admin/accounts")
+      .then((result) => setAccounts(result.accounts))
+      .catch((reason: Error) => setError(reason.message));
   }, []);
 
   async function createAccount(event: FormEvent) {
@@ -77,14 +79,14 @@ export default function AdminPage() {
   async function copyCredentials() {
     if (!credential) return;
     await navigator.clipboard.writeText(
-      `OLX Radar\nLogin: ${credential.username}\nHasło tymczasowe: ${credential.password}`,
+      `Radar Market\nLogin: ${credential.username}\nHasło tymczasowe: ${credential.password}`,
     );
   }
 
   return (
     <main className="admin-page">
       <header className="admin-header">
-        <a className="saas-brand" href="/panel"><span className="saas-brand-mark">R</span><span>OLX Radar</span></a>
+        <a className="saas-brand" href="/panel"><span className="saas-brand-mark">R</span><span>Radar Market</span></a>
         <a className="saas-button subtle" href="/panel">← Wróć do radaru</a>
       </header>
       <section className="admin-intro">

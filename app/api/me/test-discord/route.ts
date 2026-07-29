@@ -7,7 +7,7 @@ import {
   jsonError,
   requireApiAccount,
 } from "@/lib/security";
-import { getRadarRow, publicConfig } from "@/lib/store";
+import { getRadarRow, platformFromUnknown, publicConfig } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +16,9 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const { env, account } = await requireApiAccount(request);
     assertPasswordChanged(account);
-    const row = await getRadarRow(env.DB, account.username);
+    const payload = (await request.json()) as { platform?: unknown };
+    const platform = platformFromUnknown(payload.platform);
+    const row = await getRadarRow(env.DB, account.username, platform);
     if (!row.webhook_ciphertext || !row.webhook_iv) {
       throw new HttpError(400, "Najpierw zapisz webhook Discord.");
     }
@@ -28,7 +30,7 @@ export async function POST(request: Request) {
     );
     await sendDiscordTest(webhook, publicConfig(row));
     return Response.json({
-      message: "Wiadomość testowa została wysłana na Twój kanał.",
+      message: `Wiadomość testowa ${platform === "olx" ? "OLX" : "Vinted"} została wysłana na Twój kanał.`,
     });
   } catch (error) {
     return jsonError(error);

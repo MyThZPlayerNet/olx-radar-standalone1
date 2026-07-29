@@ -11,7 +11,7 @@ const groups = [
   "ABCDEFGHJKLMNPQRSTUVWXYZ",
   "abcdefghijkmnopqrstuvwxyz",
   "23456789",
-  "!@#$%*-_",
+  "!@%*-_",
 ];
 const alphabet = groups.join("");
 const characters = groups.map((group) => group[randomInt(group.length)]);

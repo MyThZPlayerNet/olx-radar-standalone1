@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
 
 type LoginState = {
   error: string;
@@ -53,10 +54,10 @@ export default function LoginPage() {
   return (
     <main className="auth-page">
       <section className="auth-story">
-        <a className="saas-brand" href="/" aria-label="OLX Radar">
+        <Link className="saas-brand" href="/" aria-label="Radar Market">
           <span className="saas-brand-mark">R</span>
-          <span>OLX Radar</span>
-        </a>
+          <span>Radar Market</span>
+        </Link>
         <div className="auth-copy">
           <p className="saas-eyebrow">PRYWATNY MONITOR OKAZJI</p>
           <h1>
@@ -65,8 +66,8 @@ export default function LoginPage() {
             <em>Zanim zobaczą je inni.</em>
           </h1>
           <p>
-            Twój osobisty radar przegląda OLX, odrzuca nietrafione wyniki
-            i wysyła wybrane oferty prosto na Twój kanał Discord.
+            Twój osobisty radar przegląda OLX i Vinted, odrzuca nietrafione
+            wyniki i wysyła wybrane oferty prosto na Twój kanał Discord.
           </p>
         </div>
         <div className="auth-proof">

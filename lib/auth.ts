@@ -121,7 +121,7 @@ function isLocalUrl(requestUrl: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1";
 }
 
-function useSecureCookie(requestUrl: string): boolean {
+function shouldUseSecureCookie(requestUrl: string): boolean {
   try {
     if (process.env.APP_URL) {
       return new URL(process.env.APP_URL).protocol === "https:";
@@ -274,12 +274,12 @@ export async function accountFromCookie(
 }
 
 export function sessionCookie(token: string, requestUrl: string): string {
-  const secure = useSecureCookie(requestUrl) ? "; Secure" : "";
+  const secure = shouldUseSecureCookie(requestUrl) ? "; Secure" : "";
   return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_SECONDS}${secure}`;
 }
 
 export function clearedSessionCookie(requestUrl: string): string {
-  const secure = useSecureCookie(requestUrl) ? "; Secure" : "";
+  const secure = shouldUseSecureCookie(requestUrl) ? "; Secure" : "";
   return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
 }
 
@@ -435,7 +435,7 @@ export async function deactivateManagedAccount(
       .bind(username),
     env.DB.prepare("DELETE FROM sessions WHERE username = ?").bind(username),
     env.DB
-      .prepare("UPDATE radars SET active = 0 WHERE owner_username = ?")
+      .prepare("UPDATE radar_profiles SET active = 0 WHERE owner_username = ?")
       .bind(username),
   ]);
 }

@@ -62,7 +62,7 @@ export function assertSameOrigin(request: Request): void {
     // Niepoprawne APP_URL zostanie zgłoszone w logu harmonogramu.
   }
   if (origin && allowedOrigins.has(origin)) return;
-  console.warn("[OLX Radar] Odrzucono żądanie z obcego źródła.", {
+  console.warn("[Radar Market] Odrzucono żądanie z obcego źródła.", {
     allowedOrigins: [...allowedOrigins],
     origin,
     requestOrigin: url.origin,
