@@ -14,12 +14,16 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const { env, account } = await requireApiAccount(request);
     assertPasswordChanged(account);
-    const payload = (await request.json()) as { platform?: unknown };
+    const payload = (await request.json()) as {
+      platform?: unknown;
+      searchId?: unknown;
+    };
     return Response.json(
       await previewUserRadar(
         env,
         account.username,
         platformFromUnknown(payload.platform),
+        typeof payload.searchId === "string" ? payload.searchId : undefined,
       ),
     );
   } catch (error) {

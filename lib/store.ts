@@ -7,6 +7,7 @@ import type {
   Platform,
   RadarConfig,
   RadarRow,
+  RadarSearch,
   RadarStatus,
   SellerType,
 } from "@/lib/types";
@@ -111,6 +112,8 @@ export async function ensureSchema(db: DatabaseLike): Promise<void> {
             name TEXT NOT NULL,
             source_url TEXT NOT NULL,
             query TEXT NOT NULL,
+            searches TEXT NOT NULL DEFAULT '[]',
+            search_webhooks TEXT NOT NULL DEFAULT '{}',
             category_id INTEGER NOT NULL DEFAULT 0,
             min_price INTEGER DEFAULT 100,
             max_price INTEGER DEFAULT 7000,
@@ -153,6 +156,16 @@ export async function ensureSchema(db: DatabaseLike): Promise<void> {
           )
         `),
         db.prepare(`
+          CREATE TABLE IF NOT EXISTS radar_search_seen_offers (
+            owner_username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+            platform TEXT NOT NULL CHECK(platform IN ('olx', 'vinted')),
+            search_id TEXT NOT NULL,
+            offer_id TEXT NOT NULL,
+            seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (owner_username, platform, search_id, offer_id)
+          )
+        `),
+        db.prepare(`
           CREATE TABLE IF NOT EXISTS radar_poll_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner_username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
@@ -173,7 +186,36 @@ export async function ensureSchema(db: DatabaseLike): Promise<void> {
         db.prepare(
           "CREATE INDEX IF NOT EXISTS radar_seen_owner_idx ON radar_seen_offers(owner_username, platform, seen_at)",
         ),
+        db.prepare(
+          "CREATE INDEX IF NOT EXISTS radar_search_seen_owner_idx ON radar_search_seen_offers(owner_username, platform, search_id, seen_at)",
+        ),
       ]);
+
+      const profileColumns = await db
+        .prepare("PRAGMA table_info(radar_profiles)")
+        .all<{ name: string }>();
+      if (
+        !(profileColumns.results ?? []).some(
+          (column) => column.name === "searches",
+        )
+      ) {
+        await db
+          .prepare(
+            "ALTER TABLE radar_profiles ADD COLUMN searches TEXT NOT NULL DEFAULT '[]'",
+          )
+          .run();
+      }
+      if (
+        !(profileColumns.results ?? []).some(
+          (column) => column.name === "search_webhooks",
+        )
+      ) {
+        await db
+          .prepare(
+            "ALTER TABLE radar_profiles ADD COLUMN search_webhooks TEXT NOT NULL DEFAULT '{}'",
+          )
+          .run();
+      }
 
       await db.batch([
         db.prepare(`
@@ -203,6 +245,13 @@ export async function ensureSchema(db: DatabaseLike): Promise<void> {
             owner_username, platform, offer_id, seen_at
           )
           SELECT owner_username, 'olx', offer_id, seen_at FROM seen_offers
+        `),
+        db.prepare(`
+          INSERT OR IGNORE INTO radar_search_seen_offers (
+            owner_username, platform, search_id, offer_id, seen_at
+          )
+          SELECT owner_username, platform, 'default', offer_id, seen_at
+          FROM radar_seen_offers
         `),
       ]);
     })().catch((error) => {
@@ -287,31 +336,125 @@ function parseList(value: string): string[] {
   }
 }
 
-export function publicConfig(row: RadarRow): RadarConfig {
+function legacySearch(row: RadarRow): RadarSearch {
   return {
-    active: Boolean(row.active),
     categoryId: row.category_id,
     conditions: parseList(row.conditions),
     deliveryRequired: Boolean(row.delivery_required),
-    discordAvatarUrl: row.discord_avatar_url,
-    discordColor: row.discord_color,
-    discordRoleId: row.discord_role_id,
-    discordUsername: row.discord_username,
     excludeKeywords: parseList(row.exclude_keywords),
+    id: "default",
     includeKeywords: parseList(row.include_keywords),
-    intervalSeconds: row.interval_seconds,
     locations: parseList(row.locations),
     matchAllKeywords: Boolean(row.match_all_keywords),
     maxAgeMinutes: row.max_age_minutes,
     maxPrice: row.max_price,
     minPrice: row.min_price,
     name: row.name,
-    platform: row.platform,
     query: row.query,
     sellerType: row.seller_type,
     skipPromoted: Boolean(row.skip_promoted),
     sourceUrl: row.source_url,
-    webhookConfigured: Boolean(row.webhook_ciphertext && row.webhook_iv),
+    webhookConfigured: false,
+  };
+}
+
+function parseSearches(row: RadarRow): RadarSearch[] {
+  const fallback = legacySearch(row);
+  try {
+    const parsed = JSON.parse(row.searches);
+    if (!Array.isArray(parsed) || !parsed.length) return [fallback];
+    return parsed
+      .filter(
+        (item): item is Partial<RadarSearch> =>
+          Boolean(item) && typeof item === "object" && !Array.isArray(item),
+      )
+      .slice(0, 10)
+      .map((item, index) => ({
+        ...fallback,
+        ...item,
+        id:
+          typeof item.id === "string" && item.id.trim()
+            ? item.id.trim().slice(0, 80)
+            : `search-${index + 1}`,
+        name:
+          typeof item.name === "string" && item.name.trim()
+            ? item.name.trim().slice(0, 80)
+            : `Wyszukiwanie ${index + 1}`,
+      }));
+  } catch {
+    return [fallback];
+  }
+}
+
+export type EncryptedWebhook = {
+  ciphertext: string;
+  iv: string;
+};
+
+function parseSearchWebhooks(row: RadarRow): Record<string, EncryptedWebhook> {
+  try {
+    const parsed = JSON.parse(row.search_webhooks);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const result: Record<string, EncryptedWebhook> = {};
+    for (const [searchId, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const candidate = value as Partial<EncryptedWebhook>;
+      if (
+        typeof candidate.ciphertext === "string" &&
+        candidate.ciphertext &&
+        typeof candidate.iv === "string" &&
+        candidate.iv
+      ) {
+        result[searchId] = {
+          ciphertext: candidate.ciphertext,
+          iv: candidate.iv,
+        };
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+export function encryptedWebhookForSearch(
+  row: RadarRow,
+  searchId: string,
+): EncryptedWebhook | null {
+  const configured = parseSearchWebhooks(row)[searchId];
+  if (configured) return configured;
+  if (
+    searchId === "default" &&
+    row.webhook_ciphertext &&
+    row.webhook_iv
+  ) {
+    return {
+      ciphertext: row.webhook_ciphertext,
+      iv: row.webhook_iv,
+    };
+  }
+  return null;
+}
+
+export function publicConfig(row: RadarRow): RadarConfig {
+  const searches = parseSearches(row).map((search) => ({
+    ...search,
+    webhookConfigured: Boolean(encryptedWebhookForSearch(row, search.id)),
+  }));
+  const primary = searches[0];
+  return {
+    ...primary,
+    active: Boolean(row.active),
+    discordAvatarUrl: row.discord_avatar_url,
+    discordColor: row.discord_color,
+    discordRoleId: row.discord_role_id,
+    discordUsername: row.discord_username,
+    intervalSeconds: row.interval_seconds,
+    platform: row.platform,
+    searches,
+    webhookConfigured: searches.every((search) => search.webhookConfigured),
   };
 }
 
@@ -325,7 +468,7 @@ export function publicStatus(row: RadarRow): RadarStatus {
     lastMatched: row.last_matched,
     lastSent: row.last_sent,
     nextCheckAt: row.next_check_at,
-    webhookConfigured: Boolean(row.webhook_ciphertext && row.webhook_iv),
+    webhookConfigured: publicConfig(row).webhookConfigured,
   };
 }
 
@@ -373,6 +516,13 @@ function sellerType(value: unknown): SellerType {
   throw new HttpError(400, "Wybierz poprawny typ sprzedającego.");
 }
 
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new HttpError(400, "Niepoprawna konfiguracja wyszukiwania.");
+  }
+  return value as Record<string, unknown>;
+}
+
 function validateSourceUrl(value: string, platform: Platform): void {
   let url: URL;
   try {
@@ -398,6 +548,70 @@ function validateSourceUrl(value: string, platform: Platform): void {
       "Wklej link do wyników wyszukiwania z vinted.pl/catalog.",
     );
   }
+}
+
+function validateSearch(
+  value: unknown,
+  platform: Platform,
+  index: number,
+): RadarSearch {
+  const raw = object(value);
+  const label = `Zakładka ${index + 1}`;
+  const id = requiredText(raw.id, `${label} — identyfikator`, 80);
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    throw new HttpError(
+      400,
+      `${label}: zapisz zakładkę ponownie, aby odświeżyć jej identyfikator.`,
+    );
+  }
+  const name = requiredText(raw.name, `${label} — nazwa`, 80);
+  const sourceUrl = requiredText(
+    raw.sourceUrl,
+    `${label} — link wyszukiwania`,
+    1500,
+  );
+  validateSourceUrl(sourceUrl, platform);
+  const query = requiredText(raw.query, `${label} — fraza`, 160);
+  const minPrice = optionalPrice(raw.minPrice, `${label} — cena od`);
+  const maxPrice = optionalPrice(raw.maxPrice, `${label} — cena do`);
+  if (minPrice !== null && maxPrice !== null && minPrice > maxPrice) {
+    throw new HttpError(
+      400,
+      `${label}: cena minimalna nie może być wyższa od maksymalnej.`,
+    );
+  }
+  return {
+    categoryId: integer(
+      raw.categoryId,
+      `${label} — ID kategorii`,
+      0,
+      999_999,
+    ),
+    conditions: list(raw.conditions, `${label} — stan przedmiotu`),
+    deliveryRequired: raw.deliveryRequired === true,
+    excludeKeywords: list(
+      raw.excludeKeywords,
+      `${label} — słowa wykluczone`,
+    ),
+    id,
+    includeKeywords: list(raw.includeKeywords, `${label} — słowa wymagane`),
+    locations: list(raw.locations, `${label} — lokalizacje`),
+    matchAllKeywords: raw.matchAllKeywords === true,
+    maxAgeMinutes: integer(
+      raw.maxAgeMinutes,
+      `${label} — wiek ogłoszenia`,
+      0,
+      525_600,
+    ),
+    maxPrice,
+    minPrice,
+    name,
+    query,
+    sellerType: sellerType(raw.sellerType),
+    skipPromoted: raw.skipPromoted === true,
+    sourceUrl,
+    webhookConfigured: false,
+  };
 }
 
 export function validateWebhookUrl(value: string): void {
@@ -430,33 +644,47 @@ export async function saveRadar(
   raw: ConfigInput,
 ): Promise<RadarConfig> {
   await ensureRadar(env.DB, username);
-  const name = requiredText(raw.name, "Nazwa radaru", 80);
-  const sourceUrl = requiredText(raw.sourceUrl, "Link wyszukiwania", 1500);
-  validateSourceUrl(sourceUrl, platform);
-  const query = requiredText(raw.query, "Fraza wyszukiwania", 160);
-  const minPrice = optionalPrice(raw.minPrice, "Cena od");
-  const maxPrice = optionalPrice(raw.maxPrice, "Cena do");
-  if (minPrice !== null && maxPrice !== null && minPrice > maxPrice) {
-    throw new HttpError(400, "Cena minimalna nie może być wyższa od maksymalnej.");
+  const rawSearches =
+    Array.isArray(raw.searches) && raw.searches.length ? raw.searches : [raw];
+  if (rawSearches.length > 10) {
+    throw new HttpError(400, "Możesz utworzyć maksymalnie 10 zakładek.");
   }
+  const searches = rawSearches.map((search, index) =>
+    validateSearch(search, platform, index),
+  );
+  if (new Set(searches.map((search) => search.id)).size !== searches.length) {
+    throw new HttpError(400, "Każda zakładka musi mieć unikalny identyfikator.");
+  }
+  const primary = searches[0];
 
-  let webhookCiphertext: string | null | undefined;
-  let webhookIv: string | null | undefined;
+  const currentRow = await getRadarRow(env.DB, username, platform);
+  const searchWebhooks = parseSearchWebhooks(currentRow);
+  const searchIds = new Set(searches.map((search) => search.id));
+  for (const searchId of Object.keys(searchWebhooks)) {
+    if (!searchIds.has(searchId)) delete searchWebhooks[searchId];
+  }
+  const webhookSearchId =
+    typeof raw.webhookSearchId === "string" && raw.webhookSearchId.trim()
+      ? raw.webhookSearchId.trim()
+      : primary.id;
+  if (!searchIds.has(webhookSearchId)) {
+    throw new HttpError(400, "Nie znaleziono zakładki dla tego webhooka.");
+  }
   if (raw.removeWebhook) {
-    webhookCiphertext = null;
-    webhookIv = null;
+    delete searchWebhooks[webhookSearchId];
   } else if (typeof raw.webhookUrl === "string" && raw.webhookUrl.trim()) {
     const webhook = raw.webhookUrl.trim();
     validateWebhookUrl(webhook);
     const encrypted = await encryptSecret(env, requestUrl, webhook);
-    webhookCiphertext = encrypted.ciphertext;
-    webhookIv = encrypted.iv;
+    searchWebhooks[webhookSearchId] = encrypted;
   }
 
   const assignments = [
     "name = ?",
     "source_url = ?",
     "query = ?",
+    "searches = ?",
+    "search_webhooks = ?",
     "category_id = ?",
     "min_price = ?",
     "max_price = ?",
@@ -474,33 +702,36 @@ export async function saveRadar(
     "discord_avatar_url = ?",
     "discord_role_id = ?",
     "discord_color = ?",
+    "initialized = 0",
+    "next_check_at = CASE WHEN active = 1 THEN CURRENT_TIMESTAMP ELSE next_check_at END",
     "updated_at = CURRENT_TIMESTAMP",
   ];
   const values: unknown[] = [
-    name,
-    sourceUrl,
-    query,
-    integer(raw.categoryId, "ID kategorii", 0, 999_999),
-    minPrice,
-    maxPrice,
+    primary.name,
+    primary.sourceUrl,
+    primary.query,
+    JSON.stringify(searches),
+    JSON.stringify(searchWebhooks),
+    primary.categoryId,
+    primary.minPrice,
+    primary.maxPrice,
     integer(raw.intervalSeconds, "Częstotliwość", 30, 86_400),
-    JSON.stringify(list(raw.includeKeywords, "Słowa wymagane")),
-    JSON.stringify(list(raw.excludeKeywords, "Słowa wykluczone")),
-    raw.matchAllKeywords === true ? 1 : 0,
-    JSON.stringify(list(raw.locations, "Lokalizacje")),
-    JSON.stringify(list(raw.conditions, "Stan przedmiotu")),
-    sellerType(raw.sellerType),
-    raw.deliveryRequired === true ? 1 : 0,
-    raw.skipPromoted === true ? 1 : 0,
-    integer(raw.maxAgeMinutes, "Wiek ogłoszenia", 0, 525_600),
+    JSON.stringify(primary.includeKeywords),
+    JSON.stringify(primary.excludeKeywords),
+    primary.matchAllKeywords ? 1 : 0,
+    JSON.stringify(primary.locations),
+    JSON.stringify(primary.conditions),
+    primary.sellerType,
+    primary.deliveryRequired ? 1 : 0,
+    primary.skipPromoted ? 1 : 0,
+    primary.maxAgeMinutes,
     requiredText(raw.discordUsername, "Nazwa nadawcy", 80),
     optionalText(raw.discordAvatarUrl, 1000),
     optionalText(raw.discordRoleId, 40),
     integer(raw.discordColor, "Kolor Discord", 0, 0xffffff),
   ];
-  if (webhookCiphertext !== undefined) {
-    assignments.push("webhook_ciphertext = ?", "webhook_iv = ?");
-    values.push(webhookCiphertext, webhookIv);
+  if (raw.removeWebhook && webhookSearchId === "default") {
+    assignments.push("webhook_ciphertext = NULL", "webhook_iv = NULL");
   }
   values.push(username, platform);
 
@@ -520,10 +751,15 @@ export async function setRadarActive(
   active: boolean,
 ): Promise<RadarStatus> {
   const row = await getRadarRow(db, username, platform);
-  if (active && !(row.webhook_ciphertext && row.webhook_iv)) {
+  const config = publicConfig(row);
+  if (active && !config.webhookConfigured) {
+    const missing = config.searches
+      .filter((search) => !search.webhookConfigured)
+      .map((search) => search.name)
+      .join(", ");
     throw new HttpError(
       400,
-      `Najpierw dodaj webhook Discord dla radaru ${platform === "olx" ? "OLX" : "Vinted"}.`,
+      `Najpierw dodaj webhook Discord dla każdej zakładki. Brakuje: ${missing}.`,
     );
   }
   await db

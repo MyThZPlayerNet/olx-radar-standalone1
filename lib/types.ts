@@ -1,29 +1,35 @@
 export type SellerType = "all" | "private" | "business";
 export type Platform = "olx" | "vinted";
 
-export type RadarConfig = {
-  active: boolean;
+export type RadarSearch = {
   categoryId: number;
   conditions: string[];
   deliveryRequired: boolean;
-  discordAvatarUrl: string;
-  discordColor: number;
-  discordRoleId: string;
-  discordUsername: string;
   excludeKeywords: string[];
+  id: string;
   includeKeywords: string[];
-  intervalSeconds: number;
   locations: string[];
   matchAllKeywords: boolean;
   maxAgeMinutes: number;
   maxPrice: number | null;
   minPrice: number | null;
   name: string;
-  platform: Platform;
   query: string;
   sellerType: SellerType;
   skipPromoted: boolean;
   sourceUrl: string;
+  webhookConfigured: boolean;
+};
+
+export type RadarConfig = RadarSearch & {
+  active: boolean;
+  discordAvatarUrl: string;
+  discordColor: number;
+  discordRoleId: string;
+  discordUsername: string;
+  intervalSeconds: number;
+  platform: Platform;
+  searches: RadarSearch[];
   webhookConfigured: boolean;
 };
 
@@ -56,6 +62,7 @@ export type PublicOffer = {
 
 export type ConfigInput = Omit<RadarConfig, "active" | "webhookConfigured"> & {
   removeWebhook?: boolean;
+  webhookSearchId?: string;
   webhookUrl?: string;
 };
 
@@ -88,6 +95,8 @@ export type RadarRow = {
   platform: Platform;
   query: string;
   seller_type: SellerType;
+  search_webhooks: string;
+  searches: string;
   skip_promoted: number;
   source_url: string;
   webhook_ciphertext: string | null;
@@ -97,7 +106,17 @@ export type RadarRow = {
 export type Account = {
   createdAt: string;
   displayName: string;
+  lastLoginAt: string | null;
   mustChangePassword: boolean;
   role: "admin" | "user";
   username: string;
+};
+
+export type AdminRadarOverview = {
+  config: RadarConfig;
+  status: RadarStatus;
+};
+
+export type AdminAccountOverview = Account & {
+  radars: Partial<Record<Platform, AdminRadarOverview>>;
 };

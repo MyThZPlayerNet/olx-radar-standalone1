@@ -1,7 +1,8 @@
 import {
   createManagedAccount,
   deactivateManagedAccount,
-  listManagedAccounts,
+  listAdminAccountOverviews,
+  setManagedRadarActive,
 } from "@/lib/auth";
 import { assertSameOrigin, jsonError, requireAdmin } from "@/lib/security";
 
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   try {
     const { env } = await requireAdmin(request);
-    return Response.json({ accounts: await listManagedAccounts(env) });
+    return Response.json({ accounts: await listAdminAccountOverviews(env) });
   } catch (error) {
     return jsonError(error);
   }
@@ -28,6 +29,30 @@ export async function POST(request: Request) {
       await createManagedAccount(env, payload.username, payload.displayName),
       { status: 201 },
     );
+  } catch (error) {
+    return jsonError(error);
+  }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    assertSameOrigin(request);
+    const { env } = await requireAdmin(request);
+    const payload = (await request.json()) as {
+      active?: unknown;
+      platform?: unknown;
+      username?: unknown;
+    };
+    const result = await setManagedRadarActive(
+      env,
+      payload.username,
+      payload.platform,
+      payload.active,
+    );
+    return Response.json({
+      message: `${result.platform === "olx" ? "OLX" : "Vinted"} użytkownika @${result.username} został ${result.status.active ? "uruchomiony" : "zatrzymany"}.`,
+      status: result.status,
+    });
   } catch (error) {
     return jsonError(error);
   }

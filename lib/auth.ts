@@ -1,7 +1,20 @@
 import { HttpError } from "@/lib/errors";
 import type { AppEnv } from "@/lib/runtime";
-import { ensureRadar, ensureSchema } from "@/lib/store";
-import type { Account } from "@/lib/types";
+import {
+  ensureRadar,
+  ensureSchema,
+  platformFromUnknown,
+  publicConfig,
+  publicStatus,
+  setRadarActive,
+} from "@/lib/store";
+import type {
+  Account,
+  AdminAccountOverview,
+  Platform,
+  RadarRow,
+  RadarStatus,
+} from "@/lib/types";
 
 export const SESSION_COOKIE = "olx_radar_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 30;
@@ -18,6 +31,7 @@ type UserRow = {
   display_name: string;
   failed_login_count: number;
   is_active: number;
+  last_login_at: string | null;
   locked_until: string | null;
   must_change_password: number;
   password_hash: string;
@@ -110,6 +124,7 @@ function accountFromRow(row: UserRow): Account {
   return {
     createdAt: row.created_at,
     displayName: row.display_name,
+    lastLoginAt: row.last_login_at,
     mustChangePassword: Boolean(row.must_change_password),
     role: row.role,
     username: row.username,
@@ -354,6 +369,7 @@ export async function createManagedAccount(
     account: {
       createdAt: new Date().toISOString(),
       displayName,
+      lastLoginAt: null,
       mustChangePassword: true,
       role: "user",
       username,
@@ -373,6 +389,66 @@ export async function listManagedAccounts(env: AppEnv): Promise<Account[]> {
     )
     .all<UserRow>();
   return (result.results ?? []).map(accountFromRow);
+}
+
+export async function listAdminAccountOverviews(
+  env: AppEnv,
+): Promise<AdminAccountOverview[]> {
+  const accounts = await listManagedAccounts(env);
+  if (!accounts.length) return [];
+  const placeholders = accounts.map(() => "?").join(",");
+  const result = await env.DB
+    .prepare(
+      `SELECT * FROM radar_profiles
+       WHERE owner_username IN (${placeholders})
+       ORDER BY owner_username, platform`,
+    )
+    .bind(...accounts.map((account) => account.username))
+    .all<RadarRow>();
+  const rows = result.results ?? [];
+  return accounts.map((account) => {
+    const radars: AdminAccountOverview["radars"] = {};
+    for (const row of rows) {
+      if (row.owner_username !== account.username) continue;
+      radars[row.platform] = {
+        config: publicConfig(row),
+        status: publicStatus(row),
+      };
+    }
+    return { ...account, radars };
+  });
+}
+
+export async function setManagedRadarActive(
+  env: AppEnv,
+  usernameValue: unknown,
+  platformValue: unknown,
+  activeValue: unknown,
+): Promise<{ platform: Platform; status: RadarStatus; username: string }> {
+  const username = normalizeUsername(usernameValue);
+  const platform = platformFromUnknown(platformValue);
+  if (typeof activeValue !== "boolean") {
+    throw new HttpError(400, "Brakuje informacji, czy radar ma być aktywny.");
+  }
+  const target = await env.DB
+    .prepare(
+      "SELECT role, is_active FROM users WHERE username = ?",
+    )
+    .bind(username)
+    .first<{ is_active: number; role: string }>();
+  if (!target || target.role !== "user" || !target.is_active) {
+    throw new HttpError(404, "Nie znaleziono aktywnego konta użytkownika.");
+  }
+  return {
+    platform,
+    status: await setRadarActive(
+      env.DB,
+      username,
+      platform,
+      activeValue,
+    ),
+    username,
+  };
 }
 
 export async function changePassword(

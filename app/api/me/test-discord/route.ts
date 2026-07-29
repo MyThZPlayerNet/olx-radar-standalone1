@@ -7,7 +7,12 @@ import {
   jsonError,
   requireApiAccount,
 } from "@/lib/security";
-import { getRadarRow, platformFromUnknown, publicConfig } from "@/lib/store";
+import {
+  encryptedWebhookForSearch,
+  getRadarRow,
+  platformFromUnknown,
+  publicConfig,
+} from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -16,21 +21,39 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const { env, account } = await requireApiAccount(request);
     assertPasswordChanged(account);
-    const payload = (await request.json()) as { platform?: unknown };
+    const payload = (await request.json()) as {
+      platform?: unknown;
+      searchId?: unknown;
+    };
     const platform = platformFromUnknown(payload.platform);
     const row = await getRadarRow(env.DB, account.username, platform);
-    if (!row.webhook_ciphertext || !row.webhook_iv) {
-      throw new HttpError(400, "Najpierw zapisz webhook Discord.");
+    const config = publicConfig(row);
+    const searchId =
+      typeof payload.searchId === "string"
+        ? payload.searchId
+        : config.searches[0]?.id;
+    const search = config.searches.find((item) => item.id === searchId);
+    if (!search) throw new HttpError(404, "Nie znaleziono wybranej zakładki.");
+    const encrypted = encryptedWebhookForSearch(row, search.id);
+    if (!encrypted) {
+      throw new HttpError(
+        400,
+        `Najpierw zapisz webhook dla zakładki „${search.name}”.`,
+      );
     }
     const webhook = await decryptSecret(
       env,
       request.url,
-      row.webhook_ciphertext,
-      row.webhook_iv,
+      encrypted.ciphertext,
+      encrypted.iv,
     );
-    await sendDiscordTest(webhook, publicConfig(row));
+    await sendDiscordTest(webhook, {
+      ...config,
+      ...search,
+      searches: [search],
+    });
     return Response.json({
-      message: `Wiadomość testowa ${platform === "olx" ? "OLX" : "Vinted"} została wysłana na Twój kanał.`,
+      message: `Wiadomość testowa dla „${search.name}” została wysłana na przypisany kanał.`,
     });
   } catch (error) {
     return jsonError(error);

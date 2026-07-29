@@ -4,6 +4,7 @@ import { sendDiscordOffer } from "@/lib/discord";
 import { matchesRadar, toPublicOffer, type Offer } from "@/lib/offers";
 import { fetchOlxOffers } from "@/lib/olx";
 import {
+  encryptedWebhookForSearch,
   ensureSchema,
   getRadarRow,
   publicConfig,
@@ -13,7 +14,9 @@ import type { AppEnv } from "@/lib/runtime";
 import type {
   Platform,
   PublicOffer,
+  RadarConfig,
   RadarRow,
+  RadarSearch,
   RadarStatus,
 } from "@/lib/types";
 import { fetchVintedOffers } from "@/lib/vinted";
@@ -21,6 +24,11 @@ import { fetchVintedOffers } from "@/lib/vinted";
 export type CheckResult = RadarStatus & {
   offers: PublicOffer[];
   skipped?: boolean;
+};
+
+type MatchedOffer = {
+  config: RadarConfig;
+  offer: Offer;
 };
 
 async function recordRun(
@@ -64,7 +72,7 @@ async function recordRun(
       .bind(username, platform, username, platform),
     db
       .prepare(
-        `DELETE FROM radar_seen_offers
+        `DELETE FROM radar_search_seen_offers
          WHERE owner_username = ? AND platform = ?
            AND seen_at < datetime('now', '-90 days')`,
       )
@@ -91,51 +99,124 @@ async function claimDueRadar(
   return (result.meta?.changes ?? 0) > 0;
 }
 
-async function unseenOffers(
+async function unseenMatches(
   db: DatabaseLike,
   username: string,
   platform: Platform,
-  offers: Offer[],
-): Promise<Offer[]> {
-  if (!offers.length) return [];
-  const placeholders = offers.map(() => "?").join(",");
-  const result = await db
-    .prepare(
-      `SELECT offer_id FROM radar_seen_offers
-       WHERE owner_username = ? AND platform = ?
-         AND offer_id IN (${placeholders})`,
-    )
-    .bind(username, platform, ...offers.map((offer) => offer.id))
-    .all<{ offer_id: string }>();
-  const seen = new Set((result.results ?? []).map((row) => row.offer_id));
-  return offers.filter((offer) => !seen.has(offer.id));
+  matches: MatchedOffer[],
+): Promise<MatchedOffer[]> {
+  if (!matches.length) return [];
+  const grouped = new Map<string, string[]>();
+  for (const match of matches) {
+    const ids = grouped.get(match.config.id) ?? [];
+    ids.push(match.offer.id);
+    grouped.set(match.config.id, ids);
+  }
+  const seen = new Set<string>();
+  for (const [searchId, offerIds] of grouped) {
+    const placeholders = offerIds.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT offer_id FROM radar_search_seen_offers
+         WHERE owner_username = ? AND platform = ? AND search_id = ?
+           AND offer_id IN (${placeholders})`,
+      )
+      .bind(username, platform, searchId, ...offerIds)
+      .all<{ offer_id: string }>();
+    for (const row of result.results ?? []) {
+      seen.add(`${searchId}:${row.offer_id}`);
+    }
+  }
+  return matches.filter(
+    (match) => !seen.has(`${match.config.id}:${match.offer.id}`),
+  );
 }
 
-async function rememberOffers(
+async function rememberMatches(
   db: DatabaseLike,
   username: string,
   platform: Platform,
-  offers: Offer[],
+  matches: MatchedOffer[],
 ): Promise<void> {
-  if (!offers.length) return;
+  if (!matches.length) return;
   await db.batch(
-    offers.map((offer) =>
+    matches.map((match) =>
       db
         .prepare(
-          `INSERT OR IGNORE INTO radar_seen_offers (
-             owner_username, platform, offer_id
-           ) VALUES (?, ?, ?)`,
+          `INSERT OR IGNORE INTO radar_search_seen_offers (
+             owner_username, platform, search_id, offer_id
+           ) VALUES (?, ?, ?, ?)`,
         )
-        .bind(username, platform, offer.id),
+        .bind(username, platform, match.config.id, match.offer.id),
     ),
   );
 }
 
-async function fetchOffers(row: RadarRow): Promise<Offer[]> {
-  const config = publicConfig(row);
-  return row.platform === "olx"
+async function fetchOffers(config: RadarConfig): Promise<Offer[]> {
+  return config.platform === "olx"
     ? fetchOlxOffers(config)
     : fetchVintedOffers(config);
+}
+
+function configForSearch(
+  config: RadarConfig,
+  search: RadarSearch,
+): RadarConfig {
+  return {
+    ...config,
+    ...search,
+    searches: [search],
+  };
+}
+
+async function collectMatchingOffers(
+  row: RadarRow,
+  selectedSearchId?: string,
+): Promise<{
+  errors: string[];
+  fetched: number;
+  matches: MatchedOffer[];
+}> {
+  const config = publicConfig(row);
+  const searches = selectedSearchId
+    ? config.searches.filter((search) => search.id === selectedSearchId)
+    : config.searches;
+  if (!searches.length) {
+    throw new Error("Nie znaleziono wybranej zakładki wyszukiwania.");
+  }
+
+  const errors: string[] = [];
+  const matches: MatchedOffer[] = [];
+  const matchedKeys = new Set<string>();
+  let fetched = 0;
+  let successfulSearches = 0;
+
+  for (const search of searches) {
+    const searchConfig = configForSearch(config, search);
+    try {
+      const offers = await fetchOffers(searchConfig);
+      successfulSearches += 1;
+      fetched += offers.length;
+      for (const offer of offers) {
+        const key = `${search.id}:${offer.id}`;
+        if (matchesRadar(offer, searchConfig) && !matchedKeys.has(key)) {
+          matchedKeys.add(key);
+          matches.push({ config: searchConfig, offer });
+        }
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Nie udało się pobrać ogłoszeń.";
+      errors.push(`${search.name}: ${message}`);
+    }
+  }
+
+  if (!successfulSearches) {
+    throw new Error(errors.join(" · ") || "Nie udało się sprawdzić zakładek.");
+  }
+  return { errors, fetched, matches };
 }
 
 async function processRadar(
@@ -143,18 +224,18 @@ async function processRadar(
   row: RadarRow,
   requestUrl: string,
 ): Promise<CheckResult> {
-  const config = publicConfig(row);
   try {
-    const offers = await fetchOffers(row);
-    const matching = offers.filter((offer) => matchesRadar(offer, config));
+    const result = await collectMatchingOffers(row);
+    const matching = result.matches.map((item) => item.offer);
+    const runErrors = [...result.errors];
     let sent = 0;
 
     if (!row.initialized) {
-      await rememberOffers(
+      await rememberMatches(
         env.DB,
         row.owner_username,
         row.platform,
-        matching,
+        result.matches,
       );
       await env.DB
         .prepare(
@@ -164,25 +245,34 @@ async function processRadar(
         .bind(row.owner_username, row.platform)
         .run();
     } else {
-      const webhook =
-        row.webhook_ciphertext && row.webhook_iv
-          ? await decryptSecret(
-              env,
-              requestUrl,
-              row.webhook_ciphertext,
-              row.webhook_iv,
-            )
-          : "";
-      if (!webhook) throw new Error("Webhook Discord nie jest skonfigurowany.");
-      const fresh = await unseenOffers(
+      const fresh = await unseenMatches(
         env.DB,
         row.owner_username,
         row.platform,
-        matching,
+        result.matches,
       );
-      for (const offer of fresh.slice(0, 10)) {
-        await sendDiscordOffer(webhook, config, offer);
-        await rememberOffers(env.DB, row.owner_username, row.platform, [offer]);
+      const webhookCache = new Map<string, string>();
+      for (const match of fresh.slice(0, 10)) {
+        const searchId = match.config.id;
+        const encrypted = encryptedWebhookForSearch(row, searchId);
+        if (!encrypted) {
+          runErrors.push(
+            `${match.config.name}: webhook Discord nie jest skonfigurowany.`,
+          );
+          continue;
+        }
+        let webhook = webhookCache.get(searchId);
+        if (!webhook) {
+          webhook = await decryptSecret(
+            env,
+            requestUrl,
+            encrypted.ciphertext,
+            encrypted.iv,
+          );
+          webhookCache.set(searchId, webhook);
+        }
+        await sendDiscordOffer(webhook, match.config, match.offer);
+        await rememberMatches(env.DB, row.owner_username, row.platform, [match]);
         sent += 1;
       }
     }
@@ -191,10 +281,10 @@ async function processRadar(
       env.DB,
       row.owner_username,
       row.platform,
-      offers.length,
+      result.fetched,
       matching.length,
       sent,
-      null,
+      runErrors.length ? [...new Set(runErrors)].join(" · ").slice(0, 1500) : null,
     );
     return {
       ...publicStatus(
@@ -243,19 +333,20 @@ export async function previewUserRadar(
   env: AppEnv,
   username: string,
   platform: Platform,
+  searchId?: string,
 ): Promise<{
   fetched: number;
   matched: number;
   offers: PublicOffer[];
 }> {
   const row = await getRadarRow(env.DB, username, platform);
-  const config = publicConfig(row);
-  const offers = await fetchOffers(row);
-  const matching = offers.filter((offer) => matchesRadar(offer, config));
+  const result = await collectMatchingOffers(row, searchId);
   return {
-    fetched: offers.length,
-    matched: matching.length,
-    offers: matching.slice(0, 24).map(toPublicOffer),
+    fetched: result.fetched,
+    matched: result.matches.length,
+    offers: result.matches
+      .slice(0, 24)
+      .map((item) => toPublicOffer(item.offer)),
   };
 }
 

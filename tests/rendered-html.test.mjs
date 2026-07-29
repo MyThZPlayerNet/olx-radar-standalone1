@@ -32,8 +32,14 @@ test("ships the protected OLX and Vinted Radar Market experience", async () => {
   assert.match(login, /Zaloguj się do radaru/);
   assert.match(login, /Nie ma publicznej rejestracji/);
   assert.match(panel, /Dwa serwisy\. Jedno konto\./);
+  assert.match(panel, /Dodaj kolejne wyszukiwanie/);
+  assert.match(panel, /Usuń zakładkę/);
+  assert.match(panel, /Każda zakładka może wysyłać ogłoszenia na inny kanał/);
   assert.match(panel, /Radar Market · OLX \+ Vinted/);
   assert.match(admin, /Wygeneruj konto/);
+  assert.match(admin, /Monitoring użytkowników/);
+  assert.match(admin, /Teraz wyszukuje/);
+  assert.match(admin, /Otwórz wyszukiwanie/);
   assert.equal(
     JSON.parse(packageJson).scripts.start,
     "node --env-file=.env .next/standalone/server.js",
@@ -41,6 +47,10 @@ test("ships the protected OLX and Vinted Radar Market experience", async () => {
   assert.match(database, /node:sqlite/);
   assert.match(scheduler, /runDueMonitors/);
   assert.match(store, /CREATE TABLE IF NOT EXISTS radar_profiles/);
+  assert.match(store, /searches TEXT NOT NULL DEFAULT '\[\]'/);
+  assert.match(store, /search_webhooks TEXT NOT NULL DEFAULT '\{\}'/);
+  assert.match(store, /CREATE TABLE IF NOT EXISTS radar_search_seen_offers/);
+  assert.match(store, /maksymalnie 10 zakładek/);
   assert.match(store, /platform TEXT NOT NULL CHECK\(platform IN \('olx', 'vinted'\)\)/);
   assert.match(vinted, /api\/v2\/catalog\/items/);
   assert.match(vinted, /access_token_web/);

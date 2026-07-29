@@ -13,6 +13,7 @@ import type {
   Platform,
   PublicOffer,
   RadarConfig,
+  RadarSearch,
   RadarStatus,
 } from "@/lib/types";
 
@@ -28,6 +29,9 @@ type Preview = {
   matched: number;
   offers: PublicOffer[];
 };
+
+type PreviewMap = Partial<Record<Platform, Record<string, Preview>>>;
+type WebhookDraftMap = Record<Platform, Record<string, string>>;
 
 const emptyStatus: RadarStatus = {
   active: false,
@@ -117,12 +121,16 @@ export default function UserPanel() {
     olx: emptyStatus,
     vinted: emptyStatus,
   });
-  const [previews, setPreviews] = useState<Partial<RadarMap<Preview>>>({});
-  const [webhooks, setWebhooks] = useState<RadarMap<string>>({
+  const [previews, setPreviews] = useState<PreviewMap>({});
+  const [webhooks, setWebhooks] = useState<WebhookDraftMap>({
+    olx: {},
+    vinted: {},
+  });
+  const [platform, setPlatform] = useState<Platform>("olx");
+  const [activeSearchIds, setActiveSearchIds] = useState<RadarMap<string>>({
     olx: "",
     vinted: "",
   });
-  const [platform, setPlatform] = useState<Platform>("olx");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState<{
     error?: boolean;
@@ -135,8 +143,14 @@ export default function UserPanel() {
   });
 
   const config = configs?.[platform] ?? null;
+  const search =
+    config?.searches.find(
+      (item) => item.id === activeSearchIds[platform],
+    ) ??
+    config?.searches[0] ??
+    null;
   const status = statuses[platform];
-  const preview = previews[platform];
+  const preview = search ? previews[platform]?.[search.id] : undefined;
   const market = marketCopy[platform];
 
   const notify = useCallback((text: string, error = false) => {
@@ -161,6 +175,10 @@ export default function UserPanel() {
         setAccount(configResult.account);
         setConfigs(configResult.configs);
         setStatuses(statusResult);
+        setActiveSearchIds({
+          olx: configResult.configs.olx.searches[0]?.id ?? "",
+          vinted: configResult.configs.vinted.searches[0]?.id ?? "",
+        });
       })
       .catch((error: Error) => notify(error.message, true));
   }, [notify]);
@@ -183,16 +201,6 @@ export default function UserPanel() {
             ...current,
             [selectedPlatform]: result,
           }));
-          if (result.offers?.length) {
-            setPreviews((current) => ({
-              ...current,
-              [selectedPlatform]: {
-                fetched: result.lastFetched,
-                matched: result.lastMatched,
-                offers: result.offers ?? [],
-              },
-            }));
-          }
         })
         .catch((error: Error) => notify(error.message, true));
     void check();
@@ -201,11 +209,11 @@ export default function UserPanel() {
   }, [notify, platform, status.active]);
 
   const priceLabel = useMemo(() => {
-    if (!config) return "—";
-    const from = config.minPrice?.toLocaleString("pl-PL") ?? "0";
-    const to = config.maxPrice?.toLocaleString("pl-PL") ?? "∞";
+    if (!search) return "—";
+    const from = search.minPrice?.toLocaleString("pl-PL") ?? "0";
+    const to = search.maxPrice?.toLocaleString("pl-PL") ?? "∞";
     return `${from}–${to} zł`;
-  }, [config]);
+  }, [search]);
 
   const activeCount = Number(statuses.olx.active) + Number(statuses.vinted.active);
 
@@ -220,12 +228,81 @@ export default function UserPanel() {
     );
   }
 
+  function patchSearch(update: Partial<RadarSearch>) {
+    if (!search) return;
+    setConfigs((current) => {
+      if (!current) return current;
+      const selectedConfig = current[platform];
+      const searches = selectedConfig.searches.map((item) =>
+        item.id === search.id ? { ...item, ...update } : item,
+      );
+      const nextConfig: RadarConfig = {
+        ...selectedConfig,
+        searches,
+      };
+      if (selectedConfig.searches[0]?.id === search.id) {
+        Object.assign(nextConfig, update);
+      }
+      return {
+        ...current,
+        [platform]: nextConfig,
+      };
+    });
+  }
+
+  function addSearch() {
+    if (!config || !search) return;
+    if (config.searches.length >= 10) {
+      notify("Możesz utworzyć maksymalnie 10 zakładek.", true);
+      return;
+    }
+    const id =
+      typeof crypto.randomUUID === "function"
+        ? `search-${crypto.randomUUID()}`
+        : `search-${Date.now()}`;
+    const next: RadarSearch = {
+      ...search,
+      id,
+      name: `${market.label} — wyszukiwanie ${config.searches.length + 1}`,
+      webhookConfigured: false,
+    };
+    patch({ searches: [...config.searches, next] });
+    setActiveSearchIds((current) => ({ ...current, [platform]: id }));
+    setPreviews((current) => ({ ...current, [platform]: {} }));
+    window.setTimeout(
+      () => document.querySelector("#search")?.scrollIntoView({ behavior: "smooth" }),
+      0,
+    );
+  }
+
+  function removeSearch() {
+    if (!config || !search || config.searches.length === 1) return;
+    if (
+      !window.confirm(
+        `Usunąć zakładkę „${search.name}”? Zmiana zostanie utrwalona po zapisaniu.`,
+      )
+    ) {
+      return;
+    }
+    const searches = config.searches.filter((item) => item.id !== search.id);
+    patch({ searches });
+    setActiveSearchIds((current) => ({
+      ...current,
+      [platform]: searches[0]?.id ?? "",
+    }));
+    setPreviews((current) => ({ ...current, [platform]: {} }));
+  }
+
   async function save(
     selectedPlatform: Platform = platform,
     silent = false,
   ): Promise<boolean> {
     const selectedConfig = configs?.[selectedPlatform];
     if (!selectedConfig) return false;
+    const selectedSearchId =
+      activeSearchIds[selectedPlatform] ||
+      selectedConfig.searches[0]?.id ||
+      "";
     setBusy(`save:${selectedPlatform}`);
     try {
       const result = await api<{ config: RadarConfig; message: string }>(
@@ -235,7 +312,8 @@ export default function UserPanel() {
           body: JSON.stringify({
             ...selectedConfig,
             platform: selectedPlatform,
-            webhookUrl: webhooks[selectedPlatform],
+            webhookSearchId: selectedSearchId,
+            webhookUrl: webhooks[selectedPlatform][selectedSearchId] ?? "",
           }),
         },
       );
@@ -244,7 +322,13 @@ export default function UserPanel() {
           ? { ...current, [selectedPlatform]: result.config }
           : current,
       );
-      setWebhooks((current) => ({ ...current, [selectedPlatform]: "" }));
+      setWebhooks((current) => ({
+        ...current,
+        [selectedPlatform]: {
+          ...current[selectedPlatform],
+          [selectedSearchId]: "",
+        },
+      }));
       if (!silent) notify(result.message);
       await refreshStatuses();
       return true;
@@ -258,16 +342,24 @@ export default function UserPanel() {
 
   async function loadPreview() {
     const selectedPlatform = platform;
+    const selectedSearchId = search?.id;
+    if (!selectedSearchId) return;
     if (!(await save(selectedPlatform, true))) return;
     setBusy(`preview:${selectedPlatform}`);
     try {
       const result = await api<Preview>("/api/me/preview", {
         method: "POST",
-        body: JSON.stringify({ platform: selectedPlatform }),
+        body: JSON.stringify({
+          platform: selectedPlatform,
+          searchId: selectedSearchId,
+        }),
       });
       setPreviews((current) => ({
         ...current,
-        [selectedPlatform]: result,
+        [selectedPlatform]: {
+          ...(current[selectedPlatform] ?? {}),
+          [selectedSearchId]: result,
+        },
       }));
       notify(
         result.matched
@@ -328,7 +420,10 @@ export default function UserPanel() {
     try {
       const result = await api<{ message: string }>("/api/me/test-discord", {
         method: "POST",
-        body: JSON.stringify({ platform: selectedPlatform }),
+        body: JSON.stringify({
+          platform: selectedPlatform,
+          searchId: search?.id,
+        }),
       });
       notify(result.message);
     } catch (error) {
@@ -365,7 +460,7 @@ export default function UserPanel() {
     }
   }
 
-  if (!configs || !config || !account) {
+  if (!configs || !config || !search || !account) {
     return (
       <main className="panel-loading">
         <span className="saas-brand-mark">R</span>
@@ -495,12 +590,13 @@ export default function UserPanel() {
           <div>
             <p className="saas-eyebrow">TWÓJ RADAR {market.label.toUpperCase()}</p>
             <h1>
-              {config.query}
+              {search.query}
               <em>{priceLabel}</em>
             </h1>
             <p>
-              {config.name} sprawdza nowe oferty co {config.intervalSeconds} sekund
-              i wysyła wyłącznie te, które przejdą filtry tego radaru.
+              {search.name} jest jedną z {config.searches.length} zakładek. Radar
+              sprawdza wszystkie co {config.intervalSeconds} sekund i wysyła
+              wyłącznie oferty, które przejdą filtry właściwej zakładki.
             </p>
             <div className="radar-buttons">
               <button
@@ -530,7 +626,7 @@ export default function UserPanel() {
             <i className="radar-blip blip-two" />
             <i className="radar-blip blip-three" />
             <small>{market.label}</small>
-            <span>{config.query.slice(0, 18)}</span>
+            <span>{search.query.slice(0, 18)}</span>
           </div>
         </section>
 
@@ -555,11 +651,70 @@ export default function UserPanel() {
               </span>
             </div>
           )}
+          <div className="search-tabs-panel">
+            <div
+              aria-label={`Zakładki wyszukiwania ${market.label}`}
+              className="search-tabs"
+              role="tablist"
+            >
+              {config.searches.map((item, index) => (
+                <button
+                  aria-selected={item.id === search.id}
+                  className={item.id === search.id ? "selected" : ""}
+                  key={item.id}
+                  onClick={() =>
+                    setActiveSearchIds((current) => ({
+                      ...current,
+                      [platform]: item.id,
+                    }))
+                  }
+                  role="tab"
+                  type="button"
+                >
+                  <small>{String(index + 1).padStart(2, "0")}</small>
+                  <span>{item.name}</span>
+                  <i
+                    className={`tab-channel-state ${
+                      item.webhookConfigured ? "connected" : ""
+                    }`}
+                    title={
+                      item.webhookConfigured
+                        ? "Kanał Discord ustawiony"
+                        : "Brak kanału Discord"
+                    }
+                  />
+                </button>
+              ))}
+              <button
+                aria-label="Dodaj kolejne wyszukiwanie"
+                className="add-search-tab"
+                disabled={config.searches.length >= 10}
+                onClick={addSearch}
+                title="Dodaj kolejne wyszukiwanie"
+                type="button"
+              >
+                +
+              </button>
+            </div>
+            <div className="search-tab-meta">
+              <span>
+                Zakładka {config.searches.findIndex((item) => item.id === search.id) + 1}
+                {" "}z {config.searches.length}
+              </span>
+              <button
+                disabled={config.searches.length === 1}
+                onClick={removeSearch}
+                type="button"
+              >
+                Usuń zakładkę
+              </button>
+            </div>
+          </div>
           <div className="form-grid">
-            <Field label="Nazwa radaru" wide>
+            <Field label="Nazwa zakładki" wide>
               <input
-                value={config.name}
-                onChange={(event) => patch({ name: event.target.value })}
+                value={search.name}
+                onChange={(event) => patchSearch({ name: event.target.value })}
               />
             </Field>
             <Field
@@ -572,14 +727,14 @@ export default function UserPanel() {
               wide
             >
               <input
-                value={config.sourceUrl}
-                onChange={(event) => patch({ sourceUrl: event.target.value })}
+                value={search.sourceUrl}
+                onChange={(event) => patchSearch({ sourceUrl: event.target.value })}
               />
             </Field>
             <Field label="Fraza">
               <input
-                value={config.query}
-                onChange={(event) => patch({ query: event.target.value })}
+                value={search.query}
+                onChange={(event) => patchSearch({ query: event.target.value })}
               />
             </Field>
             {platform === "olx" && (
@@ -587,8 +742,10 @@ export default function UserPanel() {
                 <input
                   min="0"
                   type="number"
-                  value={config.categoryId}
-                  onChange={(event) => patch({ categoryId: Number(event.target.value) })}
+                  value={search.categoryId}
+                  onChange={(event) =>
+                    patchSearch({ categoryId: Number(event.target.value) })
+                  }
                 />
               </Field>
             )}
@@ -596,9 +753,9 @@ export default function UserPanel() {
               <input
                 min="0"
                 type="number"
-                value={config.minPrice ?? ""}
+                value={search.minPrice ?? ""}
                 onChange={(event) =>
-                  patch({
+                  patchSearch({
                     minPrice: event.target.value ? Number(event.target.value) : null,
                   })
                 }
@@ -608,15 +765,18 @@ export default function UserPanel() {
               <input
                 min="0"
                 type="number"
-                value={config.maxPrice ?? ""}
+                value={search.maxPrice ?? ""}
                 onChange={(event) =>
-                  patch({
+                  patchSearch({
                     maxPrice: event.target.value ? Number(event.target.value) : null,
                   })
                 }
               />
             </Field>
-            <Field label="Sprawdzaj co (sek.)">
+            <Field
+              label="Sprawdzaj wszystkie zakładki co (sek.)"
+              help="Wspólna częstotliwość dla wybranego serwisu."
+            >
               <input
                 max="86400"
                 min="30"
@@ -632,9 +792,9 @@ export default function UserPanel() {
                 <input
                   min="0"
                   type="number"
-                  value={config.maxAgeMinutes}
+                  value={search.maxAgeMinutes}
                   onChange={(event) =>
-                    patch({ maxAgeMinutes: Number(event.target.value) })
+                    patchSearch({ maxAgeMinutes: Number(event.target.value) })
                   }
                 />
               </Field>
@@ -642,23 +802,28 @@ export default function UserPanel() {
           </div>
         </Section>
 
-        <Section id="filters" number="02" kicker="SELEKCJA" title={`Filtry ${market.label}`}>
+        <Section
+          id="filters"
+          number="02"
+          kicker="SELEKCJA"
+          title={`Filtry: ${search.name}`}
+        >
           <div className="form-grid">
             <Field label="Musi zawierać — oddziel przecinkami" wide>
               <input
                 placeholder="np. pro, 256gb"
-                value={config.includeKeywords.join(", ")}
+                value={search.includeKeywords.join(", ")}
                 onChange={(event) =>
-                  patch({ includeKeywords: listFromText(event.target.value) })
+                  patchSearch({ includeKeywords: listFromText(event.target.value) })
                 }
               />
             </Field>
             <Field label="Odrzuć, jeśli zawiera" wide>
               <input
                 placeholder="np. uszkodzony, zamienię"
-                value={config.excludeKeywords.join(", ")}
+                value={search.excludeKeywords.join(", ")}
                 onChange={(event) =>
-                  patch({ excludeKeywords: listFromText(event.target.value) })
+                  patchSearch({ excludeKeywords: listFromText(event.target.value) })
                 }
               />
             </Field>
@@ -666,18 +831,18 @@ export default function UserPanel() {
               <Field label="Lokalizacje" wide>
                 <input
                   placeholder="Pusto = cała Polska"
-                  value={config.locations.join(", ")}
+                  value={search.locations.join(", ")}
                   onChange={(event) =>
-                    patch({ locations: listFromText(event.target.value) })
+                    patchSearch({ locations: listFromText(event.target.value) })
                   }
                 />
               </Field>
             )}
             <Field label="Sprzedający">
               <select
-                value={config.sellerType}
+                value={search.sellerType}
                 onChange={(event) =>
-                  patch({
+                  patchSearch({
                     sellerType: event.target.value as RadarConfig["sellerType"],
                   })
                 }
@@ -693,12 +858,12 @@ export default function UserPanel() {
                 {conditionOptions[platform].map(([value, label]) => (
                   <label className="choice" key={value}>
                     <input
-                      checked={config.conditions.includes(value)}
+                      checked={search.conditions.includes(value)}
                       onChange={(event) =>
-                        patch({
+                        patchSearch({
                           conditions: event.target.checked
-                            ? [...config.conditions, value]
-                            : config.conditions.filter((item) => item !== value),
+                            ? [...search.conditions, value]
+                            : search.conditions.filter((item) => item !== value),
                         })
                       }
                       type="checkbox"
@@ -709,21 +874,21 @@ export default function UserPanel() {
               </div>
             </div>
             <Toggle
-              checked={config.matchAllKeywords}
+              checked={search.matchAllKeywords}
               label="Wymagaj wszystkich słów"
-              onChange={(value) => patch({ matchAllKeywords: value })}
+              onChange={(value) => patchSearch({ matchAllKeywords: value })}
             />
             {platform === "olx" && (
               <Toggle
-                checked={config.deliveryRequired}
+                checked={search.deliveryRequired}
                 label="Tylko z dostawą OLX"
-                onChange={(value) => patch({ deliveryRequired: value })}
+                onChange={(value) => patchSearch({ deliveryRequired: value })}
               />
             )}
             <Toggle
-              checked={config.skipPromoted}
+              checked={search.skipPromoted}
               label="Pomiń promowane"
-              onChange={(value) => patch({ skipPromoted: value })}
+              onChange={(value) => patchSearch({ skipPromoted: value })}
             />
           </div>
         </Section>
@@ -732,7 +897,7 @@ export default function UserPanel() {
           id="discord"
           number="03"
           kicker="POWIADOMIENIA"
-          title={`Discord dla ${market.label}`}
+          title={`Kanał dla: ${search.name}`}
         >
           <div className="discord-grid">
             <div className="discord-mock">
@@ -767,30 +932,34 @@ export default function UserPanel() {
             <div className="discord-settings">
               <div
                 className={`connection-state ${
-                  config.webhookConfigured ? "connected" : ""
+                  search.webhookConfigured ? "connected" : ""
                 }`}
               >
                 <i />{" "}
-                {config.webhookConfigured
-                  ? `Webhook ${market.label} zapisany i zaszyfrowany`
-                  : `Webhook ${market.label} nie jest jeszcze ustawiony`}
+                {search.webhookConfigured
+                  ? `Osobny kanał dla „${search.name}” jest zapisany i zaszyfrowany`
+                  : `Zakładka „${search.name}” nie ma jeszcze przypisanego kanału`}
               </div>
               <Field
                 label={
-                  config.webhookConfigured
-                    ? "Nowy webhook (opcjonalnie)"
-                    : "Webhook Discord"
+                  search.webhookConfigured
+                    ? "Zmień kanał — wklej nowy webhook"
+                    : "Webhook kanału Discord"
                 }
+                help="Każda zakładka może wysyłać ogłoszenia na inny kanał."
               >
                 <input
                   autoComplete="off"
                   placeholder="https://discord.com/api/webhooks/…"
                   type="password"
-                  value={webhooks[platform]}
+                  value={webhooks[platform][search.id] ?? ""}
                   onChange={(event) =>
                     setWebhooks((current) => ({
                       ...current,
-                      [platform]: event.target.value,
+                      [platform]: {
+                        ...current[platform],
+                        [search.id]: event.target.value,
+                      },
                     }))
                   }
                 />
@@ -817,7 +986,9 @@ export default function UserPanel() {
                 disabled={isBusy("discord") || account.mustChangePassword}
                 onClick={testDiscord}
               >
-                {isBusy("discord") ? "Wysyłam…" : `Testuj webhook ${market.label}`}
+                {isBusy("discord")
+                  ? "Wysyłam…"
+                  : `Testuj kanał: ${search.name}`}
               </button>
             </div>
           </div>
